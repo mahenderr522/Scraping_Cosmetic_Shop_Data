@@ -1,1 +1,197 @@
 @import "tailwindcss";
+
+@theme {
+  --font-display: "Bricolage Grotesque", "IBM Plex Sans", sans-serif;
+  --font-body: "IBM Plex Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+
+  --color-pine-950: #0a1411;
+  --color-pine-900: #0f1d18;
+  --color-pine-850: #132520;
+  --color-pine-800: #182e27;
+  --color-pine-700: #22403660;
+  --color-line: #24443a;
+  --color-line-soft: #1c352d;
+  --color-ink: #eaf4ee;
+  --color-mute: #8fa99c;
+  --color-dim: #5f7a6e;
+  --color-rose: #f27398;
+  --color-rose-deep: #d95580;
+  --color-mint: #6fd6b3;
+  --color-amber: #e8b45b;
+  --color-sky: #7fc4d8;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  background-color: var(--color-pine-950);
+  color: var(--color-ink);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ---------- layered ambient background ---------- */
+.scene-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(900px 620px at 88% -10%, rgba(242, 115, 152, 0.10), transparent 62%),
+    radial-gradient(820px 600px at -8% 32%, rgba(111, 214, 179, 0.08), transparent 60%),
+    radial-gradient(700px 520px at 62% 108%, rgba(127, 196, 216, 0.07), transparent 62%),
+    var(--color-pine-950);
+}
+.scene-grid {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(111, 214, 179, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(111, 214, 179, 0.045) 1px, transparent 1px);
+  background-size: 46px 46px;
+  mask-image: radial-gradient(1200px 900px at 50% 8%, #000 30%, transparent 82%);
+  -webkit-mask-image: radial-gradient(1200px 900px at 50% 8%, #000 30%, transparent 82%);
+}
+.scene-noise {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");
+}
+.glow-drift {
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 9999px;
+  filter: blur(70px);
+  opacity: 0.14;
+  animation: drift 22s ease-in-out infinite alternate;
+}
+@keyframes drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(46px, 30px, 0) scale(1.14); }
+}
+
+/* ---------- scroll reveal ---------- */
+.reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition: opacity 0.7s cubic-bezier(0.2, 0.7, 0.2, 1), transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- keyframes ---------- */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+.row-in { animation: fadeUp 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+@keyframes popIn {
+  0% { opacity: 0; transform: scale(0.3); }
+  70% { transform: scale(1.18); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.pin-in { animation: popIn 0.4s cubic-bezier(0.2, 0.7, 0.3, 1.3) both; transform-origin: center bottom; transform-box: fill-box; }
+
+@keyframes radarSpin {
+  to { transform: rotate(360deg); }
+}
+.radar-sweep {
+  animation: radarSpin 2.6s linear infinite;
+  transform-origin: center;
+}
+@keyframes ringPulse {
+  0% { transform: scale(0.25); opacity: 0.8; }
+  100% { transform: scale(1); opacity: 0; }
+}
+.radar-ring {
+  animation: ringPulse 2.6s ease-out infinite;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+@keyframes shimmer {
+  0% { background-position: -460px 0; }
+  100% { background-position: 460px 0; }
+}
+.progress-shimmer {
+  background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.28), transparent);
+  background-size: 460px 100%;
+  background-repeat: no-repeat;
+  animation: shimmer 1.3s linear infinite;
+}
+
+@keyframes blinkCaret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.caret { animation: blinkCaret 0.9s step-end infinite; }
+
+@keyframes pulseDot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(111, 214, 179, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(111, 214, 179, 0); }
+}
+.pulse-dot { animation: pulseDot 1.8s ease-out infinite; }
+.pulse-dot-rose { animation: pulseDotRose 1.6s ease-out infinite; }
+@keyframes pulseDotRose {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(242, 115, 152, 0.6); }
+  70% { box-shadow: 0 0 0 8px rgba(242, 115, 152, 0); }
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+.toast-in { animation: toastIn 0.28s cubic-bezier(0.2, 0.7, 0.3, 1.2) both; }
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+.shake { animation: shake 0.4s ease both; }
+
+@keyframes drawerIn {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+.drawer-in { animation: drawerIn 0.34s cubic-bezier(0.25, 0.8, 0.25, 1) both; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.fade-in { animation: fadeIn 0.3s ease both; }
+
+@keyframes floatY {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+.float-y { animation: floatY 5s ease-in-out infinite; }
+
+@keyframes barGrow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+.bar-grow { transform-origin: left; animation: barGrow 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+@keyframes spinSlow { to { transform: rotate(360deg); } }
+.spin-slow { animation: spinSlow 1.1s linear infinite; }
+
+/* ---------- scrollbars ---------- */
+.nice-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.nice-scroll::-webkit-scrollbar-track { background: transparent; }
+.nice-scroll::-webkit-scrollbar-thumb { background: #24443a; border-radius: 8px; }
+.nice-scroll::-webkit-scrollbar-thumb:hover { background: #2f574a; }
+
+::selection { background: rgba(242, 115, 152, 0.35); color: #fff; }
+
+input[type="range"] {
+  accent-color: var(--color-rose);
+}
