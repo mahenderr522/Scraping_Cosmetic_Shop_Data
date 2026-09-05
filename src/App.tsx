@@ -31,6 +31,7 @@ export default function App() {
   const [shops, setShops] = useState<Shop[]>([]);
   const [preset, setPreset] = useState<{ areas: string[] } | null>(null);
   const [lastSource, setLastSource] = useState<DataSource>("google");
+  const [fallbackNote, setFallbackNote] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogLine[]>([]);
@@ -70,7 +71,9 @@ export default function App() {
 
   /* ── extraction flow ───────────────────────────────── */
   const start = useCallback(
-    async (auto = false) => {
+    async (auto = false, modeOverride?: DataSource) => {
+      const effMode = modeOverride ?? mode;
+      if (modeOverride) setMode(modeOverride);
       const q = query.trim() || "cosmetics shop";
       const runId = ++runIdRef.current;
       cancelRef.current?.();
@@ -86,7 +89,8 @@ export default function App() {
       setSelectedId(null);
       setPreset(null);
       setElapsed(null);
-      setLastSource(mode);
+      setFallbackNote(null);
+      setLastSource(effMode);
       setLogs([]);
 
       const pushLog = (kind: LogKind, msg: string) =>
@@ -97,11 +101,11 @@ export default function App() {
       let shops: Shop[] = [];
       let source: DataSource = mode;
 
-      if (mode === "demo") {
+      if (effMode === "demo") {
         const gen = generateShops(q, city);
         shops = gen.shops;
         setPreset(gen.preset);
-      } else if (mode === "osm") {
+      } else if (effMode === "osm") {
         pushLog("sys", "contacting overpass-api.de · OpenStreetMap …");
         try {
           shops = await fetchOsmShops(city, abort.signal);
@@ -125,21 +129,45 @@ export default function App() {
           setRunning(false);
           return;
         }
-        pushLog("sys", "querying places.googleapis.com · places:searchText …");
+        pushLog("sys", "querying Google · places:searchText …");
         try {
-          shops = await searchGooglePlaces(apiKey, q, city, abort.signal);
-          pushLog("ok", `live response · ${shops.length} official Google listings`);
+          const res = await searchGooglePlaces(apiKey, q, city, abort.signal, (m) => pushLog("sys", m));
+          shops = res.shops;
+          pushLog(
+            "ok",
+            res.via === "new"
+              ? `live response · ${shops.length} official Google listings via Places API (New)`
+              : `live response · ${shops.length} official Google listings via legacy text-search + details`
+          );
         } catch (e) {
           if (runId !== runIdRef.current) return;
-          const msg = (e as Error)?.name === "AbortError" ? "request aborted" : (e as Error)?.message || "request failed";
-          pushLog("err", msg);
-          pushLog("warn", "Google Places unreachable — loading the demo dataset so you can keep exploring");
-          addToast("warn", "Live Google call failed — demo data loaded instead");
-          const gen = generateShops(q, city);
-          shops = gen.shops;
-          setPreset(gen.preset);
-          source = "demo";
-          setLastSource("demo");
+          const msg = (e as Error)?.message || "request failed";
+          pushLog("err", `Google: ${msg}`);
+          pushLog("warn", "trying OpenStreetMap live data instead (real numbers, no key needed) …");
+          try {
+            const osm = await fetchOsmShops(city, abort.signal);
+            if (osm.length === 0) throw new Error("0 places tagged in OSM for this area");
+            shops = osm;
+            source = "osm";
+            setLastSource("osm");
+            setFallbackNote(
+              `Google Places failed (${msg}) — showing real OpenStreetMap numbers instead. Run “Test key” in the console to repair the Google path.`
+            );
+            pushLog("ok", `live response · ${shops.length} real places from OpenStreetMap`);
+          } catch (e2) {
+            if (runId !== runIdRef.current) return;
+            pushLog("err", `OpenStreetMap also unavailable (${(e2 as Error)?.message || "no results"})`);
+            pushLog("warn", "last resort · loading the labelled synthetic demo dataset");
+            addToast("warn", "Both live sources failed — demo data loaded");
+            const gen = generateShops(q, city);
+            shops = gen.shops;
+            setPreset(gen.preset);
+            source = "demo";
+            setLastSource("demo");
+            setFallbackNote(
+              `Every live source failed (Google: ${msg}). The numbers below are SYNTHETIC demo records, not real shops. Fix the key with “Test key”, then retry Google.`
+            );
+          }
         }
       }
 
@@ -329,6 +357,39 @@ export default function App() {
         {/* results + map */}
         <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
           <section className="min-w-0">
+            {fallbackNote && (
+              <div className="fade-in mb-3.5 flex flex-wrap items-center gap-3 rounded-xl border border-amber/45 bg-amber/10 px-4 py-3 shadow-[0_10px_30px_-18px_rgba(0,0,0,0.9)]">
+                <IconAlert size={17} className="shrink-0 text-amber" />
+                <p className="min-w-0 flex-1 text-[12.5px] font-medium leading-snug text-ink/90">{fallbackNote}</p>
+                <div className="flex items-center gap-2">
+                  {lastSource === "demo" && (
+                    <button
+                      onClick={() => void start(false, "osm")}
+                      disabled={running}
+                      className="rounded-lg border border-mint/50 bg-mint/10 px-3 py-1.5 text-[12px] font-bold text-mint transition-all hover:-translate-y-0.5 hover:bg-mint/20 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Run OpenStreetMap live
+                    </button>
+                  )}
+                  {lastSource !== "google" && (
+                    <button
+                      onClick={() => void start(false, "google")}
+                      disabled={running}
+                      className="rounded-lg border border-sky/50 bg-sky/10 px-3 py-1.5 text-[12px] font-bold text-sky transition-all hover:-translate-y-0.5 hover:bg-sky/20 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Retry Google
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setFallbackNote(null)}
+                    className="rounded-lg border border-line p-1.5 text-dim transition-all hover:border-amber/50 hover:text-amber active:scale-95"
+                    aria-label="Dismiss notice"
+                  >
+                    <IconX size={13} />
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="mb-2.5 flex flex-wrap items-center gap-2.5">
               <h2 className="font-display text-[16px] font-bold tracking-tight">captured listings</h2>
               <span className={`rounded-full border px-2.5 py-0.5 font-mono text-[9.5px] uppercase tracking-widest ${lastSource === "demo" ? "border-amber/40 bg-amber/10 text-amber" : "border-mint/50 bg-mint/10 text-mint"}`}>
@@ -410,6 +471,13 @@ export default function App() {
                 title: "Export & dial",
                 tone: "text-amber border-amber/40",
                 body: "Filter to rows with a phone, tick the ones you want, then copy all numbers in one click or download CSV / JSON for your CRM or dialer. Demo mode stays clearly labelled with synthetic numbers so test data never leaks into real outreach.",
+              },
+              {
+                n: "04",
+                icon: <IconPhone size={19} />,
+                title: "Whose number is this?",
+                tone: "text-rose border-rose/40",
+                body: "The number on a listing is the line the owner published for customers — for an independent cosmetics shop, that is the owner's business number, the same one printed on the storefront. No legitimate API hands out a person's private mobile; tools claiming otherwise are guessing. GlowScout only surfaces published, callable numbers, and marks them tel:-dialable so you can verify with one call.",
               },
             ].map((r, i) => (
               <Reveal key={r.n} delay={i * 90}>

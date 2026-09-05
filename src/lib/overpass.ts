@@ -54,7 +54,7 @@ function cleanSite(u?: string): string | null {
 }
 
 export async function fetchOsmShops(city: City, signal?: AbortSignal): Promise<Shop[]> {
-  const q = buildQuery(city.lat, city.lon, 9000);
+  const q = buildQuery(city.lat, city.lon, 12000);
   let lastErr: unknown = null;
 
   for (const ep of ENDPOINTS) {
@@ -136,6 +136,7 @@ function mapElements(elements: OsmElement[], city: City): Shop[] {
       source: "osm",
     });
   }
+  shops.sort((a, b) => Number(!!b.phone) - Number(!!a.phone));
   projectShops(shops);
   return shops.slice(0, 150);
 }

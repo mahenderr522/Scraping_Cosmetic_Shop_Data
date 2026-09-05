@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { CITIES, DataSource } from "../lib/data";
 import { LogLine, LogKind } from "../lib/engine";
-import { DEFAULT_GOOGLE_KEY } from "../lib/google";
-import { IconSearch, IconPin, IconZap, IconX, IconRadar, IconGlobe, IconSpark } from "./icons";
+import { DEFAULT_GOOGLE_KEY, testGoogleKey, type KeyVerdict } from "../lib/google";
+import { IconSearch, IconPin, IconZap, IconX, IconRadar, IconGlobe, IconSpark, IconCheck, IconAlert } from "./icons";
 
 const KIND_STYLE: Record<LogKind, { label: string; cls: string }> = {
   sys: { label: "SYS", cls: "text-sky" },
@@ -56,6 +57,13 @@ interface Props {
 
 export default function Console(p: Props) {
   const city = CITIES.find((c) => c.id === p.cityId) ?? CITIES[0];
+  const [keyTest, setKeyTest] = useState<{ phase: "idle" | "busy" | "done"; verdict?: KeyVerdict }>({ phase: "idle" });
+
+  const runKeyTest = async () => {
+    setKeyTest({ phase: "busy" });
+    const verdict = await testGoogleKey(p.apiKey);
+    setKeyTest({ phase: "done", verdict });
+  };
 
   return (
     <section className="overflow-hidden rounded-xl border border-line bg-pine-900/80">
@@ -123,13 +131,38 @@ export default function Console(p: Props) {
                 id="gkey"
                 type="password"
                 value={p.apiKey}
-                onChange={(e) => p.onApiKey(e.target.value)}
+                onChange={(e) => { p.onApiKey(e.target.value); setKeyTest({ phase: "idle" }); }}
                 placeholder="AIza…"
                 className="mt-1.5 w-full rounded-md border border-line bg-pine-950/80 px-3 py-2 font-mono text-[12.5px] text-ink outline-none placeholder:text-dim focus:border-sky/60"
               />
-              <p className="mt-1.5 text-[11px] leading-snug text-dim">
-                A working key ships with GlowScout; a replacement is stored only in this browser (localStorage). It must
-                have the <em>Places API (New)</em> enabled — text search + phone fields cost ~$17–32 per 1,000 requests.
+              <div className="mt-2 flex flex-wrap items-center gap-2.5">
+                <button
+                  onClick={() => void runKeyTest()}
+                  disabled={keyTest.phase === "busy"}
+                  className="flex items-center gap-1.5 rounded-md border border-sky/50 bg-sky/10 px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-sky transition-all hover:-translate-y-0.5 hover:bg-sky/20 active:scale-95 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {keyTest.phase === "busy" ? (
+                    <><span className="spin-slow inline-block"><IconRadar size={12} /></span> testing…</>
+                  ) : (
+                    <><IconZap size={12} /> Test key</>
+                  )}
+                </button>
+                {keyTest.phase === "done" && keyTest.verdict && (
+                  <p className={`fade-in flex min-w-0 items-start gap-1.5 text-[11.5px] leading-snug ${keyTest.verdict.ok ? "text-mint" : "text-rose"}`}>
+                    <span className="mt-0.5 shrink-0">
+                      {keyTest.verdict.ok ? <IconCheck size={12} /> : <IconAlert size={12} />}
+                    </span>
+                    <span>
+                      <strong className="font-bold">{keyTest.verdict.label}.</strong>{" "}
+                      <span className={keyTest.verdict.ok ? "text-mint/80" : "text-rose/80"}>{keyTest.verdict.detail}</span>
+                    </span>
+                  </p>
+                )}
+              </div>
+              <p className="mt-2 text-[11px] leading-snug text-dim">
+                A working key ships with GlowScout; a replacement is stored only in this browser. If numbers ever look
+                wrong, hit <em>Test key</em> — it tells you exactly which Places API this key unlocks and what to enable
+                in Google Cloud Console.
               </p>
             </div>
           )}

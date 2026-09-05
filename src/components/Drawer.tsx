@@ -74,21 +74,34 @@ export default function Drawer(p: Props) {
               {s.source === "demo" ? "phone (demo)" : "phone · verified field"}
             </p>
             {s.phone ? (
-              <div className="mt-1.5 flex items-center justify-between gap-3">
+              <div className="mt-1.5 flex flex-wrap items-center justify-between gap-3">
                 <p className="font-mono text-[20px] font-semibold tracking-tight text-ink">{s.phone}</p>
-                <button
-                  onClick={() => p.onCopy(s.phone!, "Phone number copied")}
-                  className="flex shrink-0 items-center gap-1.5 rounded-lg border border-mint/50 bg-mint/10 px-3 py-2 text-[12.5px] font-semibold text-mint transition-all hover:-translate-y-0.5 hover:bg-mint/20 active:scale-95"
-                >
-                  <IconCopy size={13} /> Copy
-                </button>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={`tel:${s.phone.replace(/[^+\d]/g, "")}`}
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-mint px-3 py-2 text-[12.5px] font-bold text-pine-950 transition-all hover:-translate-y-0.5 hover:brightness-110 active:scale-95"
+                    title="Dial this number"
+                  >
+                    <IconPhone size={13} /> Call
+                  </a>
+                  <button
+                    onClick={() => p.onCopy(s.phone!, "Phone number copied")}
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg border border-mint/50 bg-mint/10 px-3 py-2 text-[12.5px] font-semibold text-mint transition-all hover:-translate-y-0.5 hover:bg-mint/20 active:scale-95"
+                  >
+                    <IconCopy size={13} /> Copy
+                  </button>
+                </div>
               </div>
             ) : (
               <p className="mt-1.5 text-[13.5px] italic text-dim">No phone number published for this listing.</p>
             )}
-            {s.phone && s.source === "osm" && (
+            {s.phone && s.source !== "demo" && (
               <p className="mt-2 font-mono text-[10.5px] leading-relaxed text-dim">
-                Sourced from the OSM <code className="text-mint/70">phone / contact:mobile</code> tag — dial before visiting.
+                {s.source === "osm" ? (
+                  <>Sourced from the OSM <code className="text-mint/70">phone / contact:mobile</code> tag — dial before visiting.</>
+                ) : (
+                  <>The <code className="text-mint/70">internationalPhoneNumber</code> published on this shop's Google listing — the owner's public business line.</>
+                )}
               </p>
             )}
           </div>

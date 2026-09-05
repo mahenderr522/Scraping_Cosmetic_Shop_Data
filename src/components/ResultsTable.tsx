@@ -241,7 +241,13 @@ export default function ResultsTable(p: Props) {
                   <td className="px-3 py-3.5" onClick={(e) => e.stopPropagation()}>
                     {s.phone ? (
                       <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-[12.5px] text-ink/90">{s.phone}</span>
+                        <a
+                          href={`tel:${s.phone.replace(/[^+\d]/g, "")}`}
+                          className="font-mono text-[12.5px] text-ink/90 underline decoration-transparent underline-offset-4 transition-colors hover:text-mint hover:decoration-mint/50"
+                          title="Dial this number"
+                        >
+                          {s.phone}
+                        </a>
                         <button
                           onClick={() => p.onCopy(s.phone!, `${s.name} — phone copied`)}
                           className="rounded-md border border-transparent p-1.5 text-dim opacity-0 transition-all hover:border-mint/40 hover:bg-mint/10 hover:text-mint group-hover:opacity-100 focus:opacity-100"

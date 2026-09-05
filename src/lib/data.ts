@@ -57,6 +57,7 @@ export interface Shop {
   lat?: number;
   lon?: number;
   osmUrl?: string | null;
+  gmapsUrl?: string | null;
   source: DataSource;
 }
 
@@ -67,6 +68,7 @@ export const SOURCE_LABEL: Record<DataSource, string> = {
 };
 
 export function mapsUrl(s: Shop): string {
+  if (s.gmapsUrl) return s.gmapsUrl;
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${s.name} ${s.address}`)}`;
 }
 
