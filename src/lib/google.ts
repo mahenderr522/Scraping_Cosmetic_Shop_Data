@@ -1,5 +1,8 @@
 import { City, Shop, HoursEntry, deriveTags, projectShops } from "./data";
 
+/** Bundled Places API (New) key — users can swap in their own in the console panel. */
+export const DEFAULT_GOOGLE_KEY = "AIzaSyDCWqMGCo6Eh3LnnFsB9IIcTDBunvtXYZ4";
+
 interface PlacePeriodTime { day: number; hour: number; minute: number }
 interface PlacePeriod { open: PlacePeriodTime; close?: PlacePeriodTime }
 interface Place {
@@ -31,7 +34,7 @@ export async function searchGooglePlaces(
       "X-Goog-FieldMask":
         "places.id,places.displayName,places.nationalPhoneNumber,places.internationalPhoneNumber,places.formattedAddress,places.rating,places.userRatingCount,places.websiteUri,places.regularOpeningHours,places.location,places.primaryTypeDisplayName,places.types",
     },
-    body: JSON.stringify({ textQuery: `${query} in ${city.name}`, maxResultCount: 20 }),
+    body: JSON.stringify({ textQuery: `${query} in ${city.name}`, maxResultCount: 20, languageCode: "en" }),
     signal,
   });
 
@@ -76,12 +79,15 @@ function mapPlaces(places: Place[], city: City): Shop[] {
     const phone = p.internationalPhoneNumber || p.nationalPhoneNumber || null;
     const { hours, raw } = mapHours(p);
     const tags = deriveTags(p.primaryTypeDisplayName, p.types?.join(" "));
+    const address = p.formattedAddress || city.name;
+    // 2nd segment of the formatted address is usually the locality / district
+    const area = (address.split(",")[1] ?? "").trim() || city.name;
 
     shops.push({
       id: `g-${p.id}`,
       name,
-      area: city.name,
-      address: p.formattedAddress || city.name,
+      area,
+      address,
       plus: p.location ? `${p.location.latitude.toFixed(5)}°, ${p.location.longitude.toFixed(5)}°` : city.name,
       phone: phone ? phone.trim() : null,
       website: p.websiteUri ? p.websiteUri.replace(/^https?:\/\//, "").replace(/\/$/, "") : null,
@@ -101,5 +107,12 @@ function mapPlaces(places: Place[], city: City): Shop[] {
     });
   }
   projectShops(shops.filter((s) => s.lat != null && s.lon != null));
+  // places without coordinates: pin them near the schematic centre
+  shops.forEach((s, i) => {
+    if (s.lat == null || s.lon == null) {
+      s.x = 50 + ((i % 5) - 2) * 7;
+      s.y = 46 + ((Math.floor(i / 5) % 3) - 1) * 9;
+    }
+  });
   return shops;
 }

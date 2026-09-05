@@ -10,7 +10,7 @@ import {
 } from "./lib/data";
 import { runExtraction, stamp, type LogKind, type LogLine } from "./lib/engine";
 import { fetchOsmShops } from "./lib/overpass";
-import { searchGooglePlaces } from "./lib/google";
+import { searchGooglePlaces, DEFAULT_GOOGLE_KEY } from "./lib/google";
 import { toCSV, toJSON, download, copyText } from "./lib/export";
 import {
   LogoMark, IconPhone, IconDownload, IconX, IconAlert, IconGlobe, IconPin, IconRadar, IconCopy,
@@ -24,13 +24,13 @@ export default function App() {
   const [cityId, setCityId] = useState("mumbai");
   const [mode, setMode] = useState<DataSource>(() => {
     const m = localStorage.getItem("gs-mode");
-    return m === "demo" || m === "google" || m === "osm" ? m : "osm";
+    return m === "demo" || m === "google" || m === "osm" ? m : "google";
   });
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gs-gkey") ?? "");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gs-gkey") ?? DEFAULT_GOOGLE_KEY);
 
   const [shops, setShops] = useState<Shop[]>([]);
   const [preset, setPreset] = useState<{ areas: string[] } | null>(null);
-  const [lastSource, setLastSource] = useState<DataSource>("osm");
+  const [lastSource, setLastSource] = useState<DataSource>("google");
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogLine[]>([]);
@@ -125,26 +125,43 @@ export default function App() {
           setRunning(false);
           return;
         }
-        pushLog("sys", "querying places.googleapis.com (v1) …");
+        pushLog("sys", "querying places.googleapis.com · places:searchText …");
         try {
           shops = await searchGooglePlaces(apiKey, q, city, abort.signal);
-          pushLog("ok", `live response · ${shops.length} places from Google`);
+          pushLog("ok", `live response · ${shops.length} official Google listings`);
         } catch (e) {
           if (runId !== runIdRef.current) return;
-          const msg = (e as Error)?.message || "request failed";
+          const msg = (e as Error)?.name === "AbortError" ? "request aborted" : (e as Error)?.message || "request failed";
           pushLog("err", msg);
-          addToast("warn", msg);
-          setRunning(false);
-          return;
+          pushLog("warn", "Google Places unreachable — loading the demo dataset so you can keep exploring");
+          addToast("warn", "Live Google call failed — demo data loaded instead");
+          const gen = generateShops(q, city);
+          shops = gen.shops;
+          setPreset(gen.preset);
+          source = "demo";
+          setLastSource("demo");
         }
       }
 
       if (runId !== runIdRef.current) return;
       if (shops.length === 0) {
-        pushLog("warn", "0 places matched — OSM coverage varies by city. Try Mumbai, Delhi, Dubai or London.");
-        addToast("warn", "No results for this city — try another target or Demo source");
-        setRunning(false);
-        return;
+        if (source !== "demo") {
+          pushLog("warn", source === "osm"
+            ? "0 places matched — OSM coverage varies by city. Try Mumbai, Delhi, Dubai or London."
+            : "0 places matched — the query or city returned no listings (or the key quota is exhausted).");
+          pushLog("warn", "falling back to the labelled demo dataset");
+          addToast("warn", "No live results — demo data loaded instead");
+          const gen = generateShops(q, city);
+          shops = gen.shops;
+          setPreset(gen.preset);
+          source = "demo";
+          setLastSource("demo");
+        } else {
+          pushLog("warn", "0 places matched — try a broader query or another city.");
+          addToast("warn", "No results for this city — try another target");
+          setRunning(false);
+          return;
+        }
       }
 
       cancelRef.current = runExtraction({
@@ -383,9 +400,9 @@ export default function App() {
               {
                 n: "02",
                 icon: <IconPin size={19} />,
-                title: "Google Places · your own key",
+                title: "Google Places · key bundled",
                 tone: "text-sky border-sky/40",
-                body: "Paste a Google Cloud key with the Places API (New) enabled and GlowScout calls places:searchText from your browser, returning the official Google listing — name, formatted address, rating and the internationalPhoneNumber field. This is the sanctioned, billed route to Google's own data; keys never leave your machine except to Google.",
+                body: "GlowScout ships with a Places API (New) key and calls places:searchText straight from your browser, returning the official Google listing — name, formatted address, rating, opening hours and the internationalPhoneNumber field. Swap in your own Google Cloud key any time; it never leaves your machine except to Google. If the call is blocked or the quota runs dry, the console flags it and falls back to the labelled demo set.",
               },
               {
                 n: "03",
@@ -429,7 +446,7 @@ export default function App() {
           </span>
           <span className="font-mono text-[11px] text-dim/70">
             {mode === "osm" && "live data via overpass-api.de · © OpenStreetMap contributors"}
-            {mode === "google" && "live data via places.googleapis.com · your API key"}
+            {mode === "google" && "live data via places.googleapis.com · Places API (New)"}
             {mode === "demo" && "demo dataset · all records synthetic"}
           </span>
           <span className="ml-auto font-mono text-[11px] text-dim/70">no data leaves your browser except the source APIs</span>

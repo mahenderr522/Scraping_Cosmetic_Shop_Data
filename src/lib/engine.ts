@@ -36,9 +36,9 @@ export function runExtraction(opts: EngineOpts): () => void {
       await sleep(360);
       onEvent("ok", `query "${query}" around ${city.name} · ${shops.length} real places captured`);
     } else if (mode === "google") {
-      onEvent("sys", "places.googleapis.com (v1) · API key verified");
+      onEvent("sys", "places.googleapis.com · searchText response cached (20 fields requested)");
       await sleep(360);
-      onEvent("ok", `textQuery "${query} in ${city.name}" · ${shops.length} places returned`);
+      onEvent("ok", `textQuery "${query} in ${city.name}" · ${shops.length} official listings captured`);
     } else {
       onEvent("sys", `maps.google.com · search "${query}" near ${city.name}`);
       await sleep(380);

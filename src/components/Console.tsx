@@ -1,5 +1,6 @@
 import { CITIES, DataSource } from "../lib/data";
 import { LogLine, LogKind } from "../lib/engine";
+import { DEFAULT_GOOGLE_KEY } from "../lib/google";
 import { IconSearch, IconPin, IconZap, IconX, IconRadar, IconGlobe, IconSpark } from "./icons";
 
 const KIND_STYLE: Record<LogKind, { label: string; cls: string }> = {
@@ -12,20 +13,20 @@ const KIND_STYLE: Record<LogKind, { label: string; cls: string }> = {
 
 const SOURCES: { id: DataSource; title: string; desc: string; icon: React.ReactNode; tone: string; badge: string }[] = [
   {
+    id: "google",
+    title: "Google Places · live",
+    desc: "Actual Google listings — names, numbers, ratings & hours — via the Places API (New). A key is bundled; swap in your own below.",
+    icon: <IconPin size={15} />,
+    tone: "border-sky/50 bg-sky/10 text-sky",
+    badge: "key bundled",
+  },
+  {
     id: "osm",
     title: "OpenStreetMap · live",
     desc: "Real shops with real phone numbers from OSM via the Overpass API. No key needed.",
     icon: <IconGlobe size={15} />,
     tone: "border-mint/50 bg-mint/10 text-mint",
     badge: "real numbers",
-  },
-  {
-    id: "google",
-    title: "Google Places · live",
-    desc: "Actual Google listings — names, numbers & ratings — using your own Places API key.",
-    icon: <IconPin size={15} />,
-    tone: "border-sky/50 bg-sky/10 text-sky",
-    badge: "needs key",
   },
   {
     id: "demo",
@@ -108,7 +109,16 @@ export default function Console(p: Props) {
 
           {p.mode === "google" && (
             <div className="fade-in mt-3 rounded-lg border border-sky/30 bg-sky/5 p-3">
-              <label className="font-mono text-[10px] uppercase tracking-[0.2em] text-sky" htmlFor="gkey">google places api key</label>
+              <div className="flex items-center justify-between gap-2">
+                <label className="font-mono text-[10px] uppercase tracking-[0.2em] text-sky" htmlFor="gkey">google places api key</label>
+                <span className={`rounded-full border px-2 py-px font-mono text-[9px] uppercase tracking-wider ${
+                  p.apiKey.trim() && p.apiKey.trim() !== DEFAULT_GOOGLE_KEY
+                    ? "border-amber/50 bg-amber/10 text-amber"
+                    : "border-sky/50 bg-sky/10 text-sky"
+                }`}>
+                  {p.apiKey.trim() && p.apiKey.trim() !== DEFAULT_GOOGLE_KEY ? "custom key" : "bundled key"}
+                </span>
+              </div>
               <input
                 id="gkey"
                 type="password"
@@ -118,8 +128,8 @@ export default function Console(p: Props) {
                 className="mt-1.5 w-full rounded-md border border-line bg-pine-950/80 px-3 py-2 font-mono text-[12.5px] text-ink outline-none placeholder:text-dim focus:border-sky/60"
               />
               <p className="mt-1.5 text-[11px] leading-snug text-dim">
-                Stored only in this browser (localStorage). Enable the <em>Places API (New)</em> in Google Cloud Console —
-                phone fields cost ~$17 per 1,000 requests.
+                A working key ships with GlowScout; a replacement is stored only in this browser (localStorage). It must
+                have the <em>Places API (New)</em> enabled — text search + phone fields cost ~$17–32 per 1,000 requests.
               </p>
             </div>
           )}
