@@ -1,119 +1,92 @@
-import { Shop, generateShops } from "./data";
-import { rng, hashSeed, int, chance } from "./rand";
+import { City, DataSource, Shop } from "./data";
 
-export type LogKind = "sys" | "ok" | "warn" | "data";
+export type LogKind = "sys" | "ok" | "warn" | "err" | "cap";
 export interface LogLine {
   id: number;
-  time: string;
+  t: string;
   kind: LogKind;
   msg: string;
 }
 
-export interface EngineHooks {
-  onLog: (kind: LogKind, msg: string) => void;
-  onBatch: (shops: Shop[]) => void;
+const stamp = () =>
+  new Date().toLocaleTimeString("en-GB", { hour12: false });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+interface EngineOpts {
+  query: string;
+  city: City;
+  mode: DataSource;
+  shops: Shop[];
+  onEvent: (kind: LogKind, msg: string) => void;
+  onBatch: (batch: Shop[]) => void;
   onProgress: (pct: number) => void;
-  onPhase: (phase: string) => void;
-  onDone: (stats: { total: number; phones: number; elapsed: number; aborted: boolean }) => void;
+  onDone: (summary: { total: number; withPhone: number; durationMs: number }) => void;
 }
 
-export interface CancelToken {
-  cancelled: boolean;
-}
+/** Streams a captured shop list into the UI with a live pipeline log. Returns a cancel fn. */
+export function runExtraction(opts: EngineOpts): () => void {
+  const { query, city, mode, shops, onEvent, onBatch, onProgress, onDone } = opts;
+  let cancelled = false;
+  const startedAt = Date.now();
 
-const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
-
-const stamp = () => {
-  const d = new Date();
-  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
-};
-
-/**
- * Demo extraction pipeline. Streams synthetic (deterministic per query+city)
- * Google-Maps-style place results in batches, mimicking a paginated local
- * search scrape. Swap `generateShops` for a real endpoint adapter to go live.
- */
-export async function runExtraction(
-  query: string,
-  city: string,
-  token: CancelToken,
-  hooks: EngineHooks
-): Promise<void> {
-  const t0 = performance.now();
-  const r = rng(hashSeed(`engine|${query}|${city}`));
-  const { shops } = generateShops(query, city);
-  const phones = shops.filter((s) => s.phone).length;
-
-  const log = (kind: LogKind, msg: string) => hooks.onLog(kind, msg);
-
-  log("sys", `glowscout engine v2.4 · source: synth-demo (deterministic)`);
-  await sleep(380);
-  if (token.cancelled) return abort();
-  log("sys", `query → “${query}” near “${city}”`);
-  hooks.onPhase("Resolving search");
-  await sleep(520);
-  if (token.cancelled) return abort();
-  log("ok", "place search resolved · viewport locked to city bounds");
-  await sleep(340);
-
-  const pageSize = int(r, 16, 20);
-  const pages = Math.ceil(shops.length / pageSize);
-  let captured = 0;
-  let offset = 0;
-
-  for (let p = 1; p <= pages; p++) {
-    if (token.cancelled) return abort();
-    hooks.onPhase(`Crawling page ${p}/${pages}`);
-    log("sys", `scrolling results · page ${p} of ${pages}…`);
-    await sleep(int(r, 500, 800));
-    if (token.cancelled) return abort();
-
-    // occasional deterministic rate-limit flavor
-    if (p === 2 && chance(r, 0.45)) {
-      log("warn", "HTTP 429 · backing off 900ms with jitter");
-      await sleep(900);
-      if (token.cancelled) return abort();
-      log("ok", "retry succeeded · resuming crawl");
-      await sleep(260);
+  const script = async () => {
+    if (mode === "osm") {
+      onEvent("sys", "overpass-api.de · live OpenStreetMap feed connected");
+      await sleep(360);
+      onEvent("ok", `query "${query}" around ${city.name} · ${shops.length} real places captured`);
+    } else if (mode === "google") {
+      onEvent("sys", "places.googleapis.com (v1) · API key verified");
+      await sleep(360);
+      onEvent("ok", `textQuery "${query} in ${city.name}" · ${shops.length} places returned`);
+    } else {
+      onEvent("sys", `maps.google.com · search "${query}" near ${city.name}`);
+      await sleep(380);
+      onEvent("ok", "result grid resolved · hydrating place details");
+      await sleep(300);
+      onEvent("warn", "synthetic demo dataset — swap source to OSM/Google for live numbers");
     }
+    await sleep(260);
 
-    const slice = shops.slice(offset, offset + pageSize);
-    // stream in sub-batches so the table fills gradually
-    let i = 0;
-    while (i < slice.length) {
-      if (token.cancelled) return abort();
-      const chunk = slice.slice(i, i + int(r, 3, 5));
-      chunk.forEach((s, idx) => (s.capturedAt = offset + i + idx));
-      hooks.onBatch(chunk);
-      captured += chunk.length;
-      hooks.onProgress(Math.round((captured / shops.length) * 88));
-      log("data", `captured ${chunk.length} places · “${chunk[0].name}” ${chunk[0].phone ? `· ${chunk[0].phone}` : "· no phone listed"}`);
-      i += chunk.length;
-      await sleep(int(r, 230, 420));
+    let withPhone = 0;
+    let done = 0;
+    const batch: Shop[] = [];
+
+    for (const s of shops) {
+      if (cancelled) return;
+      batch.push(s);
+      done += 1;
+      if (s.phone) withPhone += 1;
+      onEvent("cap", `capture ▸ ${s.name} · ${s.phone ?? "no phone listed"}`);
+      if (done % 6 === 0) {
+        onEvent("ok", `hydrating detail cards ${done}/${shops.length}`);
+      }
+      if (batch.length >= 5) {
+        onBatch([...batch]);
+        batch.length = 0;
+      }
+      onProgress(Math.round((done / Math.max(1, shops.length)) * 100));
+      await sleep(150 + Math.random() * 90);
     }
-    offset += pageSize;
-  }
+    if (batch.length && !cancelled) onBatch([...batch]);
 
-  if (token.cancelled) return abort();
-  hooks.onPhase("Normalizing fields");
-  log("sys", "extracting fields · phone / address / hours / website");
-  await sleep(620);
-  if (token.cancelled) return abort();
-  hooks.onProgress(96);
-  log("sys", `dedupe + normalize · ${shops.length} unique listings`);
-  await sleep(420);
-  if (token.cancelled) return abort();
+    if (cancelled) return;
+    await sleep(280);
 
-  const elapsed = (performance.now() - t0) / 1000;
-  hooks.onProgress(100);
-  hooks.onPhase("Complete");
-  log("ok", `done in ${elapsed.toFixed(1)}s · ${shops.length} shops · ${phones} phone numbers captured`);
-  hooks.onDone({ total: shops.length, phones, elapsed, aborted: false });
-  return;
+    if (mode === "osm") {
+      onEvent("ok", `done · ${withPhone} real phone numbers from OSM tags (phone / contact:mobile)`);
+    } else if (mode === "google") {
+      onEvent("ok", `done · ${withPhone} phone numbers via Places internationalPhoneNumber`);
+    } else {
+      onEvent("ok", `done · ${shops.length} listings captured · ${withPhone} with phone`);
+    }
+    onDone({ total: shops.length, withPhone, durationMs: Date.now() - startedAt });
+  };
 
-  function abort() {
-    hooks.onPhase("Aborted");
-    log("warn", `aborted by operator · ${captured}/${shops.length} listings kept`);
-    hooks.onDone({ total: captured, phones, elapsed: (performance.now() - t0) / 1000, aborted: true });
-  }
+  void script();
+  return () => {
+    cancelled = true;
+  };
 }
+
+export { stamp };

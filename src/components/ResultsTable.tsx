@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Shop, isOpenNow, hoursLabel, mapsUrl, ALL_TAGS } from "../lib/data";
+import { Shop, type Tag as TagT, isOpenNow, hoursLabel, mapsUrl, ALL_TAGS } from "../lib/data";
 import { copyText } from "../lib/export";
 import { Stars, Tag } from "./ui";
 import {
@@ -51,16 +51,16 @@ export default function ResultsTable(p: Props) {
     const q = f.text.trim().toLowerCase();
     let list = p.shops.filter((s) => {
       if (q && !`${s.name} ${s.area} ${s.address}`.toLowerCase().includes(q)) return false;
-      if (s.rating < f.minRating) return false;
+      if ((s.rating ?? -1) < f.minRating) return false;
       if (f.openNow && !isOpenNow(s)) return false;
       if (f.hasPhone && !s.phone) return false;
       if (f.hasWeb && !s.website) return false;
-      if (f.tag && !s.tags.includes(f.tag)) return false;
+      if (f.tag && !s.tags.includes(f.tag as TagT)) return false;
       return true;
     });
     list = [...list].sort((a, b) => {
       if (p.sort.key === "name") return a.name.localeCompare(b.name) * p.sort.dir;
-      return (a[p.sort.key] - b[p.sort.key]) * p.sort.dir;
+      return ((a[p.sort.key] ?? -1) - (b[p.sort.key] ?? -1)) * p.sort.dir;
     });
     return list;
   }, [p.shops, f, p.sort]);
@@ -226,11 +226,17 @@ export default function ResultsTable(p: Props) {
                     </div>
                   </td>
                   <td className="px-3 py-3.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-[13.5px] font-semibold text-amber">{s.rating.toFixed(1)}</span>
-                      <Stars rating={s.rating} />
-                    </div>
-                    <p className="mt-0.5 font-mono text-[11px] text-dim">{s.reviews.toLocaleString()} reviews</p>
+                    {s.rating != null ? (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[13.5px] font-semibold text-amber">{s.rating.toFixed(1)}</span>
+                          <Stars rating={s.rating} />
+                        </div>
+                        <p className="mt-0.5 font-mono text-[11px] text-dim">{s.reviews.toLocaleString()} reviews</p>
+                      </>
+                    ) : (
+                      <span className="font-mono text-[11.5px] italic text-dim">no public rating</span>
+                    )}
                   </td>
                   <td className="px-3 py-3.5" onClick={(e) => e.stopPropagation()}>
                     {s.phone ? (
@@ -250,7 +256,7 @@ export default function ResultsTable(p: Props) {
                   </td>
                   <td className="max-w-[220px] px-3 py-3.5">
                     <p className="truncate text-[13px] text-mute">{s.address}</p>
-                    <p className="mt-0.5 font-mono text-[10.5px] text-dim">{s.plusCode}</p>
+                    <p className="mt-0.5 font-mono text-[10.5px] text-dim">{s.plus}</p>
                   </td>
                   <td className="px-3 py-3.5">
                     <span

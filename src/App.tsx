@@ -1,359 +1,470 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Console, { RunStatus } from "./components/Console";
-import StatsStrip from "./components/StatsStrip";
-import ResultsTable, { Filters, Sort } from "./components/ResultsTable";
+import Console from "./components/Console";
 import MapPanel from "./components/MapPanel";
+import ResultsTable, { Filters, Sort } from "./components/ResultsTable";
 import Drawer from "./components/Drawer";
-import { ToastStack, Toast, Reveal } from "./components/ui";
-import { LogoMark, IconDownload, IconPhone, IconX, IconSpark, IconArrow, IconAlert } from "./components/icons";
-import { Shop, CityPreset, isOpenNow, generateShops } from "./lib/data";
-import { LogLine, LogKind, CancelToken, runExtraction } from "./lib/engine";
-import { exportCSV, exportJSON, copyText, phonesList } from "./lib/export";
+import StatsStrip from "./components/StatsStrip";
+import { Reveal, ToastStack, type Toast } from "./components/ui";
+import {
+  CITIES, type DataSource, type Shop, SOURCE_LABEL, generateShops, isOpenNow,
+} from "./lib/data";
+import { runExtraction, stamp, type LogKind, type LogLine } from "./lib/engine";
+import { fetchOsmShops } from "./lib/overpass";
+import { searchGooglePlaces } from "./lib/google";
+import { toCSV, toJSON, download, copyText } from "./lib/export";
+import {
+  LogoMark, IconPhone, IconDownload, IconX, IconAlert, IconGlobe, IconPin, IconRadar, IconCopy,
+} from "./components/icons";
 
-const DEFAULT_FILTERS: Filters = { text: "", minRating: 0, openNow: false, hasPhone: false, hasWeb: false, tag: null };
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 export default function App() {
+  /* ── state ─────────────────────────────────────────── */
   const [query, setQuery] = useState("cosmetics shop");
-  const [city, setCity] = useState("Mumbai");
-  const [cityError, setCityError] = useState<string | null>(null);
-  const [status, setStatus] = useState<RunStatus>("idle");
-  const [phase, setPhase] = useState("");
+  const [cityId, setCityId] = useState("mumbai");
+  const [mode, setMode] = useState<DataSource>(() => {
+    const m = localStorage.getItem("gs-mode");
+    return m === "demo" || m === "google" || m === "osm" ? m : "osm";
+  });
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("gs-gkey") ?? "");
+
+  const [shops, setShops] = useState<Shop[]>([]);
+  const [preset, setPreset] = useState<{ areas: string[] } | null>(null);
+  const [lastSource, setLastSource] = useState<DataSource>("osm");
+  const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogLine[]>([]);
-  const [shops, setShops] = useState<Shop[]>([]);
-  const [preset, setPreset] = useState<CityPreset | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
-
-  const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
-  const [sort, setSort] = useState<Sort>({ key: "reviews", dir: -1 });
+  const [filters, setFilters] = useState<Filters>({ text: "", minRating: 0, openNow: false, hasPhone: false, hasWeb: false, tag: null });
+  const [sort, setSort] = useState<Sort>({ key: "rating", dir: -1 });
   const [page, setPage] = useState(1);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const tokenRef = useRef<CancelToken | null>(null);
-  const logId = useRef(0);
-  const didInit = useRef(false);
+  const runIdRef = useRef(0);
+  const cancelRef = useRef<(() => void) | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const startedRef = useRef(false);
 
-  /* ---------------- toasts ---------------- */
+  const city = useMemo(() => CITIES.find((c) => c.id === cityId) ?? CITIES[0], [cityId]);
+
+  useEffect(() => localStorage.setItem("gs-mode", mode), [mode]);
+  useEffect(() => localStorage.setItem("gs-gkey", apiKey), [apiKey]);
+
+  /* ── toasts ────────────────────────────────────────── */
   const addToast = useCallback((kind: Toast["kind"], msg: string) => {
-    const id = ++logId.current + 90000;
+    const id = Date.now() + Math.random();
     setToasts((t) => [...t.slice(-3), { id, kind, msg }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2800);
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
   }, []);
 
-  /* ---------------- copy helper ---------------- */
-  const handleCopy = useCallback(async (text: string, msg: string) => {
-    const ok = await copyText(text);
-    if (ok) {
-      setCopied(text);
-      setTimeout(() => setCopied(null), 1600);
-      addToast("copy", msg);
-    } else {
-      addToast("warn", "Clipboard unavailable in this browser");
-    }
-  }, [addToast]);
+  const handleCopy = useCallback(
+    async (text: string, msg: string) => {
+      const ok = await copyText(text);
+      addToast(ok ? "copy" : "warn", ok ? msg : "Clipboard blocked by browser");
+    },
+    [addToast]
+  );
 
-  /* ---------------- engine ---------------- */
-  const run = useCallback(async (q: string, c: string) => {
-    if (!c.trim()) {
-      setCityError("Enter a target city — e.g. Mumbai");
-      return;
-    }
-    setCityError(null);
+  /* ── extraction flow ───────────────────────────────── */
+  const start = useCallback(
+    async (auto = false) => {
+      const q = query.trim() || "cosmetics shop";
+      const runId = ++runIdRef.current;
+      cancelRef.current?.();
+      abortRef.current?.abort();
+      const abort = new AbortController();
+      abortRef.current = abort;
 
-    if (tokenRef.current) tokenRef.current.cancelled = true;
-    const token: CancelToken = { cancelled: false };
-    tokenRef.current = token;
+      setRunning(true);
+      setProgress(0);
+      setShops([]);
+      setChecked(new Set());
+      setPage(1);
+      setSelectedId(null);
+      setPreset(null);
+      setElapsed(null);
+      setLastSource(mode);
+      setLogs([]);
 
-    setStatus("running");
-    setShops([]);
-    setLogs([]);
-    setProgress(0);
-    setPhase("Booting engine");
-    setChecked(new Set());
-    setPage(1);
-    setSelectedId(null);
-    setPreset(generateShops(q || "cosmetics shop", c).preset);
+      const pushLog = (kind: LogKind, msg: string) =>
+        setLogs((l) => [...l.slice(-160), { id: Date.now() + Math.random(), t: stamp(), kind, msg }]);
 
-    const pushLog = (kind: LogKind, msg: string) => {
-      const time = new Date().toTimeString().slice(0, 8);
-      setLogs((l) => [...l.slice(-60), { id: ++logId.current, time, kind, msg }]);
-    };
+      pushLog("sys", `target locked ▸ "${q}" · ${city.name}, ${city.country}`);
 
-    await runExtraction(q || "cosmetics shop", c, token, {
-      onLog: pushLog,
-      onBatch: (batch) => setShops((s) => [...s, ...batch]),
-      onProgress: setProgress,
-      onPhase: setPhase,
-      onDone: (stats) => {
-        setStatus("done");
-        setElapsed(stats.elapsed);
-        if (!stats.aborted) addToast("ok", `Extraction complete — ${stats.total} shops, ${stats.phones} phones`);
-      },
-    });
-  }, [addToast]);
+      let shops: Shop[] = [];
+      let source: DataSource = mode;
+
+      if (mode === "demo") {
+        const gen = generateShops(q, city);
+        shops = gen.shops;
+        setPreset(gen.preset);
+      } else if (mode === "osm") {
+        pushLog("sys", "contacting overpass-api.de · OpenStreetMap …");
+        try {
+          shops = await fetchOsmShops(city, abort.signal);
+          pushLog("ok", `live response · ${shops.length} real places tagged cosmetics / beauty / perfumery`);
+        } catch (e) {
+          if (runId !== runIdRef.current) return;
+          const msg = (e as Error)?.name === "AbortError" ? "request aborted" : (e as Error)?.message || "request failed";
+          pushLog("err", msg);
+          pushLog("warn", "Overpass unreachable from this network — loading demo dataset instead");
+          addToast("warn", "Live OSM fetch failed — demo data loaded so you can explore");
+          const gen = generateShops(q, city);
+          shops = gen.shops;
+          setPreset(gen.preset);
+          source = "demo";
+          setLastSource("demo");
+        }
+      } else {
+        if (!apiKey.trim()) {
+          pushLog("err", "no API key — paste your Google Places key in the console panel");
+          addToast("warn", "Add your Google Places API key first");
+          setRunning(false);
+          return;
+        }
+        pushLog("sys", "querying places.googleapis.com (v1) …");
+        try {
+          shops = await searchGooglePlaces(apiKey, q, city, abort.signal);
+          pushLog("ok", `live response · ${shops.length} places from Google`);
+        } catch (e) {
+          if (runId !== runIdRef.current) return;
+          const msg = (e as Error)?.message || "request failed";
+          pushLog("err", msg);
+          addToast("warn", msg);
+          setRunning(false);
+          return;
+        }
+      }
+
+      if (runId !== runIdRef.current) return;
+      if (shops.length === 0) {
+        pushLog("warn", "0 places matched — OSM coverage varies by city. Try Mumbai, Delhi, Dubai or London.");
+        addToast("warn", "No results for this city — try another target or Demo source");
+        setRunning(false);
+        return;
+      }
+
+      cancelRef.current = runExtraction({
+        query: q,
+        city,
+        mode: source,
+        shops,
+        onEvent: (kind, msg) => {
+          if (runId === runIdRef.current) pushLog(kind, msg);
+        },
+        onBatch: (b) => {
+          if (runId === runIdRef.current) setShops((s) => [...s, ...b]);
+        },
+        onProgress: (pct) => {
+          if (runId === runIdRef.current) setProgress(pct);
+        },
+        onDone: (sum) => {
+          if (runId !== runIdRef.current) return;
+          setRunning(false);
+          setElapsed(sum.durationMs / 1000);
+          addToast("ok", `${sum.total} shops captured · ${sum.withPhone} with a phone number`);
+        },
+      });
+    },
+    [query, city, mode, apiKey, addToast]
+  );
 
   const stop = useCallback(() => {
-    if (tokenRef.current) tokenRef.current.cancelled = true;
+    runIdRef.current += 1;
+    abortRef.current?.abort();
+    cancelRef.current?.();
+    setRunning(false);
+    setLogs((l) => [...l, { id: Date.now() + Math.random(), t: stamp(), kind: "warn", msg: "stopped by operator" }]);
   }, []);
 
-  /* ---------------- auto demo run on first load ---------------- */
+  /* auto-run once on first load */
+  const startRef = useRef(start);
+  startRef.current = start;
   useEffect(() => {
-    if (didInit.current) return;
-    didInit.current = true;
-    const t = setTimeout(() => run("cosmetics shop", "Mumbai"), 700);
-    return () => clearTimeout(t);
-  }, [run]);
+    if (!startedRef.current) {
+      startedRef.current = true;
+      void startRef.current(true);
+    }
+  }, []);
 
-  useEffect(() => () => { if (tokenRef.current) tokenRef.current.cancelled = true; }, []);
-
-  /* ---------------- derived ---------------- */
-  const stats = useMemo(() => {
-    const phones = shops.filter((s) => s.phone).length;
-    const avg = shops.length ? shops.reduce((a, s) => a + s.rating, 0) / shops.length : 0;
-    const open = shops.filter((s) => isOpenNow(s)).length;
-    return { total: shops.length, phones, avgRating: avg, openNow: open };
+  /* ── derived ───────────────────────────────────────── */
+  const phones = useMemo(() => shops.filter((s) => s.phone).length, [shops]);
+  const avgRating = useMemo(() => {
+    const rated = shops.filter((s) => s.rating != null);
+    return rated.length ? rated.reduce((a, s) => a + (s.rating as number), 0) / rated.length : 0;
   }, [shops]);
+  const openCount = useMemo(() => shops.filter((s) => isOpenNow(s)).length, [shops]);
 
-  const selectedShop = shops.find((s) => s.id === selectedId) ?? null;
-  const checkedShops = shops.filter((s) => checked.has(s.id));
+  const exportSet = useCallback(
+    () => (checked.size ? shops.filter((s) => checked.has(s.id)) : shops),
+    [shops, checked]
+  );
 
-  const toggle = (id: string) =>
-    setChecked((c) => {
-      const n = new Set(c);
-      n.has(id) ? n.delete(id) : n.add(id);
+  const onExportCSV = useCallback(() => {
+    const set = exportSet();
+    if (!set.length) return;
+    download(`glowscout-${slug(city.name)}-${set.length}.csv`, toCSV(set), "text/csv;charset=utf-8");
+    addToast("export", `CSV exported · ${set.length} rows${checked.size ? " (selection)" : ""}`);
+  }, [exportSet, city.name, checked.size, addToast]);
+
+  const onExportJSON = useCallback(() => {
+    const set = exportSet();
+    if (!set.length) return;
+    download(`glowscout-${slug(city.name)}-${set.length}.json`, toJSON(set), "application/json");
+    addToast("export", `JSON exported · ${set.length} rows${checked.size ? " (selection)" : ""}`);
+  }, [exportSet, city.name, checked.size, addToast]);
+
+  const onCopyPhones = useCallback(async () => {
+    const list = exportSet().filter((s) => s.phone).map((s) => s.phone as string);
+    if (!list.length) {
+      addToast("warn", "No phone numbers in the current set");
+      return;
+    }
+    const ok = await copyText(list.join("\n"));
+    addToast(ok ? "copy" : "warn", ok ? `${list.length} phone numbers copied to clipboard` : "Clipboard blocked by browser");
+  }, [exportSet, addToast]);
+
+  const toggleCheck = useCallback((id: string) => {
+    setChecked((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
       return n;
     });
+  }, []);
 
-  const toggleAll = (ids: string[]) =>
-    setChecked((c) => {
-      const all = ids.every((id) => c.has(id));
-      const n = new Set(c);
+  const toggleAll = useCallback((ids: string[]) => {
+    setChecked((prev) => {
+      const all = ids.every((id) => prev.has(id));
+      const n = new Set(prev);
       ids.forEach((id) => (all ? n.delete(id) : n.add(id)));
       return n;
     });
+  }, []);
 
-  const exportCheckedOrAll = (kind: "csv" | "json") => {
-    const list = checkedShops.length ? checkedShops : shops;
-    if (!list.length) return addToast("warn", "Nothing to export yet");
-    kind === "csv" ? exportCSV(list, city) : exportJSON(list, city);
-    addToast("export", `${kind.toUpperCase()} exported — ${list.length} listings${checkedShops.length ? " (selection)" : ""}`);
-  };
+  const selectedShop = useMemo(() => shops.find((s) => s.id === selectedId) ?? null, [shops, selectedId]);
 
-  const copyPhones = async () => {
-    const list = checkedShops.length ? checkedShops : shops;
-    const txt = phonesList(list);
-    if (!txt) return addToast("warn", "No phone numbers in the current set");
-    await handleCopy(txt, `${txt.split("\n").length} phone numbers copied`);
-  };
-
+  /* ── render ────────────────────────────────────────── */
   return (
-    <div className="min-h-screen font-body text-ink">
+    <div className="relative min-h-screen overflow-x-clip text-ink">
       {/* ambient layers */}
-      <div className="scene-bg" />
-      <div className="scene-grid" />
-      <div className="scene-noise" />
-      <div className="glow-drift" style={{ top: "-120px", right: "-100px", width: 380, height: 380, background: "var(--color-rose)" }} />
-      <div className="glow-drift" style={{ bottom: "-140px", left: "-120px", width: 420, height: 420, background: "var(--color-mint)", animationDelay: "-9s" }} />
+      <div className="scene-bg pointer-events-none fixed inset-0" />
+      <div className="scene-grid pointer-events-none fixed inset-0" />
+      <div className="scene-noise pointer-events-none fixed inset-0" />
+      <div className="glow-drift pointer-events-none fixed -top-40 left-1/4 h-[520px] w-[520px] rounded-full bg-rose/10 blur-[130px]" />
+      <div className="glow-drift pointer-events-none fixed right-0 top-1/3 h-[420px] w-[420px] rounded-full bg-mint/10 blur-[120px]" style={{ animationDelay: "-6s" }} />
 
-      {/* header */}
-      <header className="sticky top-0 z-50 border-b border-line-soft bg-pine-950/85 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-          <a href="#console" className="group flex items-center gap-2.5">
-            <span className="transition-transform group-hover:-rotate-6 group-hover:scale-110"><LogoMark size={30} /></span>
-            <span className="font-display text-[19px] font-bold tracking-tight">
-              Glow<span className="text-rose">Scout</span>
-            </span>
-            <span className="ml-1 hidden rounded border border-line bg-pine-850 px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-widest text-dim sm:block">maps lead engine</span>
-          </a>
-          <nav className="hidden items-center gap-5 font-mono text-[11.5px] uppercase tracking-[0.14em] text-mute md:flex">
-            <a href="#console" className="transition-colors hover:text-rose">Console</a>
-            <a href="#results" className="transition-colors hover:text-rose">Results</a>
-            <a href="#map" className="transition-colors hover:text-rose">Map</a>
-            <a href="#method" className="transition-colors hover:text-rose">Method</a>
-          </nav>
-          <div className="flex items-center gap-2.5">
-            <span className="hidden items-center gap-1.5 rounded-full border border-amber/40 bg-amber/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-amber sm:flex">
-              <IconAlert size={11} /> demo data
-            </span>
-            <button
-              onClick={() => exportCheckedOrAll("csv")}
-              disabled={!shops.length}
-              className="flex items-center gap-1.5 rounded-lg border border-mint/40 bg-mint/10 px-3 py-1.5 text-[12px] font-semibold text-mint transition-all hover:-translate-y-0.5 hover:bg-mint/20 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <IconDownload size={13} /> Export
-            </button>
+      <div className="relative mx-auto max-w-[1340px] px-4 pb-24 sm:px-6">
+        {/* header */}
+        <header className="flex flex-wrap items-center gap-x-4 gap-y-3 py-6">
+          <div className="flex items-center gap-3">
+            <span className="float-y"><LogoMark size={38} /></span>
+            <div>
+              <h1 className="font-display text-[24px] font-extrabold leading-none tracking-tight">
+                Glow<span className="text-rose">Scout</span>
+              </h1>
+              <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.24em] text-dim">map → cosmetics shop lead sheet</p>
+            </div>
           </div>
-        </div>
-      </header>
+          <div className="ml-auto flex items-center gap-2.5">
+            <span className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 font-mono text-[10.5px] uppercase tracking-widest ${mode === "demo" ? "border-line text-dim" : "border-mint/50 bg-mint/10 text-mint"}`}>
+              <IconRadar size={12} />
+              source: {mode === "osm" ? "openstreetmap" : mode === "google" ? "google places" : "demo synth"}
+            </span>
+            <span className="hidden rounded-full border border-line px-3 py-1.5 font-mono text-[10.5px] uppercase tracking-widest text-dim sm:block">
+              v2.1 · live numbers
+            </span>
+          </div>
+        </header>
 
-      <main className="mx-auto max-w-7xl px-4 pb-24 sm:px-6">
-        {/* console opens the page */}
-        <div className="pt-10 sm:pt-14">
-          <Console
-            query={query}
-            city={city}
-            status={status}
-            logs={logs}
-            progress={progress}
-            phase={phase}
-            cityError={cityError}
-            onQuery={(v) => setQuery(v)}
-            onCity={(v) => { setCity(v); setCityError(null); }}
-            onRun={() => run(query, city)}
-            onStop={stop}
+        {/* console */}
+        <Console
+          query={query}
+          onQuery={setQuery}
+          cityId={cityId}
+          onCity={setCityId}
+          running={running}
+          progress={progress}
+          logs={logs}
+          onRun={() => void start()}
+          onStop={stop}
+          mode={mode}
+          onMode={setMode}
+          apiKey={apiKey}
+          onApiKey={setApiKey}
+        />
+
+        {/* stats */}
+        <div className="mt-5">
+          <StatsStrip
+            total={shops.length}
+            phones={phones}
+            avgRating={avgRating}
+            openNow={openCount}
+            elapsed={elapsed}
+            active={shops.length > 0}
           />
         </div>
 
-        {/* stats */}
-        <div className="mt-8">
-          <StatsStrip {...stats} elapsed={elapsed} active={shops.length > 0} />
+        {/* results + map */}
+        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
+          <section className="min-w-0">
+            <div className="mb-2.5 flex flex-wrap items-center gap-2.5">
+              <h2 className="font-display text-[16px] font-bold tracking-tight">captured listings</h2>
+              <span className={`rounded-full border px-2.5 py-0.5 font-mono text-[9.5px] uppercase tracking-widest ${lastSource === "demo" ? "border-amber/40 bg-amber/10 text-amber" : "border-mint/50 bg-mint/10 text-mint"}`}>
+                {SOURCE_LABEL[lastSource]}
+              </span>
+              {lastSource !== "demo" && (
+                <span className="font-mono text-[10.5px] text-dim">phone numbers are real, published listings</span>
+              )}
+              {lastSource === "demo" && (
+                <span className="font-mono text-[10.5px] text-amber/80">demo numbers — not callable</span>
+              )}
+            </div>
+            <ResultsTable
+              shops={shops}
+              running={running}
+              filters={filters}
+              onFilters={setFilters}
+              sort={sort}
+              onSort={setSort}
+              page={page}
+              onPage={setPage}
+              checked={checked}
+              onToggle={toggleCheck}
+              onToggleAll={toggleAll}
+              hoveredId={hoveredId}
+              onHover={setHoveredId}
+              onSelect={setSelectedId}
+              onCopy={handleCopy}
+              onExportCSV={onExportCSV}
+              onExportJSON={onExportJSON}
+            />
+          </section>
+
+          <div className="xl:sticky xl:top-5 xl:self-start">
+            <MapPanel
+              shops={shops}
+              running={running}
+              preset={preset}
+              cityName={city.name}
+              hoveredId={hoveredId}
+              onHover={setHoveredId}
+              onSelect={setSelectedId}
+            />
+          </div>
         </div>
 
-        {/* results + map */}
-        <section id="results" className="mt-8 scroll-mt-20">
-          <div className="grid gap-5 xl:grid-cols-[1fr_390px]">
-            <div className="min-w-0">
-              <ResultsTable
-                shops={shops}
-                running={status === "running"}
-                filters={filters}
-                onFilters={setFilters}
-                sort={sort}
-                onSort={setSort}
-                page={page}
-                onPage={setPage}
-                checked={checked}
-                onToggle={toggle}
-                onToggleAll={toggleAll}
-                hoveredId={hoveredId}
-                onHover={setHoveredId}
-                onSelect={setSelectedId}
-                onCopy={handleCopy}
-                onExportCSV={() => exportCheckedOrAll("csv")}
-                onExportJSON={() => exportCheckedOrAll("json")}
-              />
-            </div>
-            <div id="map" className="scroll-mt-20">
-              <div className="xl:sticky xl:top-20">
-                <MapPanel
-                  shops={shops}
-                  preset={preset}
-                  running={status === "running"}
-                  hoveredId={hoveredId}
-                  selectedId={selectedId}
-                  onHover={setHoveredId}
-                  onSelect={setSelectedId}
-                />
-              </div>
-            </div>
-          </div>
-        </section>
+        {/* how the numbers get here */}
+        <section className="mt-16">
+          <Reveal>
+            <p className="font-mono text-[10.5px] uppercase tracking-[0.24em] text-rose">provenance</p>
+            <h2 className="mt-2 font-display text-[clamp(24px,3.2vw,34px)] font-extrabold leading-tight tracking-tight">
+              where these phone numbers come from
+            </h2>
+            <p className="mt-3 max-w-2xl text-[14.5px] leading-relaxed text-mute">
+              GlowScout never invents contact data in live mode. Pick a source in the console — each one feeds the exact
+              same pipeline, table and export.
+            </p>
+          </Reveal>
 
-        {/* method */}
-        <section id="method" className="mt-20 scroll-mt-20">
-          <div className="grid gap-10 lg:grid-cols-[1fr_1.4fr]">
-            <Reveal>
-              <div className="lg:sticky lg:top-24">
-                <p className="mb-2 flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.22em] text-mint">
-                  <IconSpark size={13} /> how the pipeline works
-                </p>
-                <h2 className="font-display text-[clamp(1.6rem,3.2vw,2.5rem)] font-bold leading-[1.05] tracking-tight">
-                  Built like a real scraper, running on a <span className="text-rose">safe demo source.</span>
-                </h2>
-                <p className="mt-4 max-w-md text-[14.5px] leading-relaxed text-mute">
-                  This build streams a deterministic synthetic dataset shaped exactly like a Google
-                  Maps local-search crawl — same fields, same pagination cadence, same failure
-                  modes — so every control is fully functional without touching live scraping.
-                </p>
-                <div className="mt-6 rounded-xl border border-amber/35 bg-amber/[0.06] p-4">
-                  <p className="flex items-center gap-2 font-mono text-[11px] font-semibold uppercase tracking-[0.16em] text-amber">
-                    <IconAlert size={13} /> compliance note
-                  </p>
-                  <p className="mt-2 text-[13px] leading-relaxed text-mute">
-                    Automated collection from Google Maps is governed by Google's Terms of Service
-                    and local data-protection law. For production use, go through licensed data
-                    providers or official APIs — and always respect rate limits.
-                  </p>
-                </div>
-              </div>
-            </Reveal>
-
-            <div className="space-y-4">
-              {[
-                {
-                  n: "01",
-                  t: "Point it at a source",
-                  d: "The engine is source-agnostic. In production, swap the synth adapter for a licensed provider endpoint (Outscraper, SerpAPI, or your own headless crawler) — the pipeline, logs and UI stay identical.",
-                  chip: "runExtraction(query, city, token, hooks)",
-                },
-                {
-                  n: "02",
-                  t: "Extract & normalize",
-                  d: "Each place is captured, deduplicated and normalized into a fixed schema — the exact fields a cosmetics retailer needs for outreach.",
-                  chip: "name · phone · address · hours · website · rating · reviews · photos",
-                },
-                {
-                  n: "03",
-                  t: "Ship it to your CRM",
-                  d: "Filter to shops that have a phone number and are open now, tick the keepers, then export CSV or JSON — or copy the whole phone list in one click and paste straight into your dialer.",
-                  chip: "export CSV / JSON · copy phones · open in Google Maps",
-                },
-              ].map((s, i) => (
-                <Reveal key={s.n} delay={i * 110}>
-                  <div className="group flex gap-5 rounded-xl border border-line bg-pine-900/70 p-5 transition-all hover:-translate-y-1 hover:border-rose/40 hover:shadow-xl hover:shadow-rose/[0.06] sm:p-6">
-                    <span className="font-display text-[42px] font-bold leading-none text-line transition-colors group-hover:text-rose sm:text-[52px]">{s.n}</span>
-                    <div className="min-w-0">
-                      <h3 className="font-display text-[19px] font-semibold">{s.t}</h3>
-                      <p className="mt-1.5 text-[13.5px] leading-relaxed text-mute">{s.d}</p>
-                      <p className="mt-3 inline-block max-w-full truncate rounded-md border border-line-soft bg-pine-950/70 px-2.5 py-1.5 font-mono text-[11px] text-mint">{s.chip}</p>
-                    </div>
+          <div className="mt-8 space-y-3">
+            {[
+              {
+                n: "01",
+                icon: <IconGlobe size={19} />,
+                title: "OpenStreetMap · Overpass API",
+                tone: "text-mint border-mint/40",
+                body: "A live query for shop=cosmetics / beauty / perfumery / chemist within ~9 km of the city centre, answered by the public Overpass API. The phone comes straight from the listing's phone / contact:mobile tag — the same number shown on openstreetmap.org. No key, no account, ODbL-licensed community data.",
+              },
+              {
+                n: "02",
+                icon: <IconPin size={19} />,
+                title: "Google Places · your own key",
+                tone: "text-sky border-sky/40",
+                body: "Paste a Google Cloud key with the Places API (New) enabled and GlowScout calls places:searchText from your browser, returning the official Google listing — name, formatted address, rating and the internationalPhoneNumber field. This is the sanctioned, billed route to Google's own data; keys never leave your machine except to Google.",
+              },
+              {
+                n: "03",
+                icon: <IconDownload size={19} />,
+                title: "Export & dial",
+                tone: "text-amber border-amber/40",
+                body: "Filter to rows with a phone, tick the ones you want, then copy all numbers in one click or download CSV / JSON for your CRM or dialer. Demo mode stays clearly labelled with synthetic numbers so test data never leaks into real outreach.",
+              },
+            ].map((r, i) => (
+              <Reveal key={r.n} delay={i * 90}>
+                <div className="group flex gap-5 rounded-xl border border-line bg-pine-900/60 p-5 transition-all hover:-translate-y-1 hover:border-line hover:bg-pine-900/90 hover:shadow-[0_16px_40px_-20px_rgba(0,0,0,0.8)] sm:gap-7 sm:p-6">
+                  <span className={`hidden h-12 w-12 shrink-0 place-items-center rounded-lg border bg-pine-950/60 sm:grid ${r.tone}`}>{r.icon}</span>
+                  <div className="min-w-0">
+                    <p className="font-mono text-[11px] tracking-[0.2em] text-dim">{r.n}</p>
+                    <h3 className="mt-1 font-display text-[17px] font-bold tracking-tight">{r.title}</h3>
+                    <p className="mt-2 max-w-3xl text-[13.5px] leading-relaxed text-mute">{r.body}</p>
                   </div>
-                </Reveal>
-              ))}
-            </div>
+                </div>
+              </Reveal>
+            ))}
           </div>
+
+          <Reveal delay={120}>
+            <div className="mt-6 flex items-start gap-3.5 rounded-xl border border-amber/30 bg-amber/5 p-5">
+              <IconAlert size={18} className="mt-0.5 shrink-0 text-amber" />
+              <p className="text-[13px] leading-relaxed text-mute">
+                <strong className="font-semibold text-amber">Fair-use notice.</strong> Direct scraping of Google Maps search
+                pages is blocked by Google and breaches its Terms of Service — that's why GlowScout routes live data
+                through the official Places API with your own key, or through OpenStreetMap's open data. Respect local
+                call-time rules (DND/CTPR registries) when dialing captured numbers. Live map data ©{" "}
+                <a className="text-mint underline decoration-mint/40 underline-offset-2 hover:decoration-mint" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a> (ODbL).
+              </p>
+            </div>
+          </Reveal>
         </section>
-      </main>
+
+        {/* footer */}
+        <footer className="mt-14 flex flex-wrap items-center gap-x-6 gap-y-3 border-t border-line-soft pt-6">
+          <span className="flex items-center gap-2 font-mono text-[11px] text-dim">
+            <LogoMark size={18} /> GlowScout — built for beauty-industry lead research
+          </span>
+          <span className="font-mono text-[11px] text-dim/70">
+            {mode === "osm" && "live data via overpass-api.de · © OpenStreetMap contributors"}
+            {mode === "google" && "live data via places.googleapis.com · your API key"}
+            {mode === "demo" && "demo dataset · all records synthetic"}
+          </span>
+          <span className="ml-auto font-mono text-[11px] text-dim/70">no data leaves your browser except the source APIs</span>
+        </footer>
+      </div>
 
       {/* selection bar */}
       {checked.size > 0 && (
-        <div className="toast-in fixed bottom-5 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 rounded-xl border border-rose/40 bg-pine-850/95 py-2.5 pl-4 pr-2.5 shadow-2xl shadow-black/50 backdrop-blur">
-          <span className="mr-1 font-mono text-[12px] font-semibold text-rose">{checked.size} selected</span>
-          <button onClick={() => exportCheckedOrAll("csv")} className="flex items-center gap-1.5 rounded-lg bg-rose px-3 py-2 text-[12.5px] font-semibold text-pine-950 transition-all hover:bg-rose-deep hover:text-ink active:scale-95">
-            <IconDownload size={13} /> CSV
-          </button>
-          <button onClick={copyPhones} className="flex items-center gap-1.5 rounded-lg border border-mint/50 bg-mint/10 px-3 py-2 text-[12.5px] font-semibold text-mint transition-all hover:bg-mint/20 active:scale-95">
+        <div className="toast-in fixed bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-rose/40 bg-pine-950/95 py-2.5 pl-4 pr-2.5 shadow-2xl shadow-black/50 backdrop-blur">
+          <span className="mr-1 font-mono text-[12px] text-ink">
+            <strong className="text-rose">{checked.size}</strong> selected
+          </span>
+          <button
+            onClick={() => void onCopyPhones()}
+            className="flex items-center gap-1.5 rounded-lg bg-mint px-3.5 py-2 text-[12.5px] font-bold text-pine-950 transition-all hover:-translate-y-0.5 hover:brightness-110 active:scale-95"
+          >
             <IconPhone size={13} /> Copy phones
           </button>
-          <button onClick={() => setChecked(new Set())} className="rounded-lg p-2 text-dim transition-colors hover:text-ink" aria-label="Clear selection">
+          <button
+            onClick={onExportCSV}
+            className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-[12.5px] font-semibold text-mute transition-all hover:border-mint/40 hover:text-mint active:scale-95"
+          >
+            <IconDownload size={13} /> CSV
+          </button>
+          <button
+            onClick={() => setChecked(new Set())}
+            className="rounded-lg border border-line p-2 text-dim transition-all hover:border-rose/40 hover:text-rose active:scale-95"
+            aria-label="Clear selection"
+          >
             <IconX size={14} />
           </button>
         </div>
       )}
 
-      {/* footer */}
-      <footer className="border-t border-line-soft bg-pine-950/60">
-        <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-4 px-4 py-8 sm:px-6 md:flex-row md:items-center">
-          <div className="flex items-center gap-2.5">
-            <LogoMark size={22} />
-            <p className="font-mono text-[11.5px] text-dim">
-              GlowScout · maps lead engine — synthetic demo data, no live Google scraping occurs in this build.
-            </p>
-          </div>
-          <p className="flex items-center gap-2 font-mono text-[11.5px] text-dim">
-            made for beauty retail outreach <IconArrow size={12} className="text-rose" /> © {new Date().getFullYear()}
-          </p>
-        </div>
-      </footer>
-
-      {/* overlays */}
-      {selectedShop && (
-        <Drawer shop={selectedShop} onClose={() => setSelectedId(null)} onCopy={handleCopy} copied={copied} />
-      )}
+      <Drawer shop={selectedShop} onClose={() => setSelectedId(null)} onCopy={handleCopy} />
       <ToastStack toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
     </div>
   );
